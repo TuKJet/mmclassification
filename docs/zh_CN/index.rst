@@ -26,7 +26,14 @@ You can switch between Chinese and English documentation in the lower-left corne
    tutorials/runtime.md
 
 
-.. include:: _model_zoo.rst
+.. toctree::
+   :maxdepth: 1
+   :caption: 模型库
+   :glob:
+
+   modelzoo_statistics.md
+   model_zoo.md
+   papers/*
 
 
 .. toctree::
@@ -52,7 +59,30 @@ You can switch between Chinese and English documentation in the lower-left corne
 .. toctree::
    :caption: API 参考文档
 
-   api.rst
+   mmcls.apis <api/apis>
+   mmcls.core <api/core>
+   mmcls.models <api/models>
+   mmcls.models.utils <api/models.utils>
+   mmcls.datasets <api/datasets>
+   数据转换 <api/transforms>
+   批数据增强 <api/models.utils.augment>
+   mmcls.utils <api/utils>
+
+
+.. toctree::
+   :maxdepth: 1
+   :caption: 其他说明
+
+   changelog.md
+   compatibility.md
+   faq.md
+
+
+.. toctree::
+   :maxdepth: 1
+   :caption: 设备支持
+
+   device/npu.md
 
 
 .. toctree::

@@ -6,7 +6,7 @@ from .mean_ap import average_precision, mAP
 from .multilabel_eval_metrics import average_performance
 
 __all__ = [
-    'DistEvalHook', 'EvalHook', 'precision', 'recall', 'f1_score', 'support',
-    'average_precision', 'mAP', 'average_performance',
-    'calculate_confusion_matrix', 'precision_recall_f1'
+    'precision', 'recall', 'f1_score', 'support', 'average_precision', 'mAP',
+    'average_performance', 'calculate_confusion_matrix', 'precision_recall_f1',
+    'EvalHook', 'DistEvalHook'
 ]

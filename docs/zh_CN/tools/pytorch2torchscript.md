@@ -2,11 +2,10 @@
 
 <!-- TOC -->
 
-- [Pytorch 转 TorchScript （试验性的）](#pytorch-torchscript)
-  - [如何将 PyTorch 模型转换至 TorchScript](#id1)
-    - [使用方法](#id2)
-  - [提示](#id3)
-  - [常见问题](#id4)
+- [如何将 PyTorch 模型转换至 TorchScript](#如何将-pytorch-模型转换至-torchscript)
+  - [使用方法](#使用方法)
+- [提示](#提示)
+- [常见问题](#常见问题)
 
 <!-- TOC -->
 
@@ -34,7 +33,7 @@ python tools/deployment/pytorch2torchscript.py \
 示例：
 
 ```bash
-python tools/deployment/pytorch2onnx.py \
+python tools/deployment/pytorch2torchscript.py \
     configs/resnet/resnet18_8xb16_cifar10.py \
     --checkpoint checkpoints/resnet/resnet18_b16x8_cifar10.pth \
     --output-file checkpoints/resnet/resnet18_b16x8_cifar10.pt \

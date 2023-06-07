@@ -8,20 +8,15 @@ import mmcv
 import numpy as np
 import torch
 from mmcv import DictAction
-from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
-from mmcv.runner import get_dist_info, init_dist, load_checkpoint
+from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
+                         wrap_fp16_model)
 
 from mmcls.apis import multi_gpu_test, single_gpu_test
 from mmcls.datasets import build_dataloader, build_dataset
 from mmcls.models import build_classifier
-
-# TODO import `wrap_fp16_model` from mmcv and delete them from mmcls
-try:
-    from mmcv.runner import wrap_fp16_model
-except ImportError:
-    warnings.warn('wrap_fp16_model from mmcls will be deprecated.'
-                  'Please install mmcv>=1.1.4.')
-    from mmcls.core import wrap_fp16_model
+from mmcls.utils import (auto_select_device, get_root_logger,
+                         setup_multi_processes, wrap_distributed_model,
+                         wrap_non_distributed_model)
 
 
 def parse_args():
@@ -67,13 +62,6 @@ def parse_args():
         'Note that the quotation marks are necessary and that no white space '
         'is allowed.')
     parser.add_argument(
-        '--options',
-        nargs='+',
-        action=DictAction,
-        help='override some settings in the used config, the key-value pair '
-        'in xxx=yyy format will be merged into config file (deprecate), '
-        'change to --cfg-options instead.')
-    parser.add_argument(
         '--metric-options',
         nargs='+',
         action=DictAction,
@@ -88,27 +76,30 @@ def parse_args():
         help='custom options for show_result. key-value pair in xxx=yyy.'
         'Check available options in `model.show_result`.')
     parser.add_argument(
+        '--gpu-ids',
+        type=int,
+        nargs='+',
+        help='(Deprecated, please use --gpu-id) ids of gpus to use '
+        '(only applicable to non-distributed testing)')
+    parser.add_argument(
+        '--gpu-id',
+        type=int,
+        default=0,
+        help='id of gpu to use '
+        '(only applicable to non-distributed testing)')
+    parser.add_argument(
         '--launcher',
         choices=['none', 'pytorch', 'slurm', 'mpi'],
         default='none',
         help='job launcher')
     parser.add_argument('--local_rank', type=int, default=0)
-    parser.add_argument(
-        '--device',
-        choices=['cpu', 'cuda'],
-        default='cuda',
-        help='device used for testing')
+    parser.add_argument('--device', help='device used for testing')
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
 
-    if args.options and args.cfg_options:
-        raise ValueError(
-            '--options and --cfg-options cannot be both '
-            'specified, --options is deprecated in favor of --cfg-options')
-    if args.options:
-        warnings.warn('--options is deprecated in favor of --cfg-options')
-        args.cfg_options = args.options
+    assert args.metrics or args.out, \
+        'Please specify at least one of output path and evaluation metrics.'
 
     return args
 
@@ -119,14 +110,24 @@ def main():
     cfg = mmcv.Config.fromfile(args.config)
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
+
+    # set multi-process settings
+    setup_multi_processes(cfg)
+
     # set cudnn_benchmark
     if cfg.get('cudnn_benchmark', False):
         torch.backends.cudnn.benchmark = True
     cfg.model.pretrained = None
-    cfg.data.test.test_mode = True
 
-    assert args.metrics or args.out, \
-        'Please specify at least one of output path and evaluation metrics.'
+    if args.gpu_ids is not None:
+        cfg.gpu_ids = args.gpu_ids[0:1]
+        warnings.warn('`--gpu-ids` is deprecated, please use `--gpu-id`. '
+                      'Because we only support single GPU mode in '
+                      'non-distributed testing. Use the first GPU '
+                      'in `gpu_ids` now.')
+    else:
+        cfg.gpu_ids = [args.gpu_id]
+    cfg.device = args.device or auto_select_device()
 
     # init distributed env first, since logger depends on the dist info.
     if args.launcher == 'none':
@@ -135,16 +136,32 @@ def main():
         distributed = True
         init_dist(args.launcher, **cfg.dist_params)
 
+    dataset = build_dataset(cfg.data.test, default_args=dict(test_mode=True))
+
     # build the dataloader
-    dataset = build_dataset(cfg.data.test)
-    # the extra round_up data will be removed during gpu/cpu collect
-    data_loader = build_dataloader(
-        dataset,
-        samples_per_gpu=cfg.data.samples_per_gpu,
-        workers_per_gpu=cfg.data.workers_per_gpu,
+    # The default loader config
+    loader_cfg = dict(
+        # cfg.gpus will be ignored if distributed
+        num_gpus=1 if cfg.device == 'ipu' else len(cfg.gpu_ids),
         dist=distributed,
-        shuffle=False,
-        round_up=True)
+        round_up=True,
+    )
+    # The overall dataloader settings
+    loader_cfg.update({
+        k: v
+        for k, v in cfg.data.items() if k not in [
+            'train', 'val', 'test', 'train_dataloader', 'val_dataloader',
+            'test_dataloader'
+        ]
+    })
+    test_loader_cfg = {
+        **loader_cfg,
+        'shuffle': False,  # Not shuffle by default
+        'sampler_cfg': None,  # Not use sampler by default
+        **cfg.data.get('test_dataloader', {}),
+    }
+    # the extra round_up data will be removed during gpu/cpu collect
+    data_loader = build_dataloader(dataset, **test_loader_cfg)
 
     # build the model and load checkpoint
     model = build_classifier(cfg.model)
@@ -163,28 +180,35 @@ def main():
         CLASSES = ImageNet.CLASSES
 
     if not distributed:
-        if args.device == 'cpu':
-            model = model.cpu()
-        else:
-            model = MMDataParallel(model, device_ids=[0])
+        model = wrap_non_distributed_model(
+            model, device=cfg.device, device_ids=cfg.gpu_ids)
+        if cfg.device == 'ipu':
+            from mmcv.device.ipu import cfg2options, ipu_model_wrapper
+            opts = cfg2options(cfg.runner.get('options_cfg', {}))
+            if fp16_cfg is not None:
+                model.half()
+            model = ipu_model_wrapper(model, opts, fp16_cfg=fp16_cfg)
+            data_loader.init(opts['inference'])
         model.CLASSES = CLASSES
-        show_kwargs = {} if args.show_options is None else args.show_options
+        show_kwargs = args.show_options or {}
         outputs = single_gpu_test(model, data_loader, args.show, args.show_dir,
                                   **show_kwargs)
     else:
-        model = MMDistributedDataParallel(
-            model.cuda(),
-            device_ids=[torch.cuda.current_device()],
-            broadcast_buffers=False)
+        model = wrap_distributed_model(
+            model, device=cfg.device, broadcast_buffers=False)
         outputs = multi_gpu_test(model, data_loader, args.tmpdir,
                                  args.gpu_collect)
 
     rank, _ = get_dist_info()
     if rank == 0:
         results = {}
+        logger = get_root_logger()
         if args.metrics:
-            eval_results = dataset.evaluate(outputs, args.metrics,
-                                            args.metric_options)
+            eval_results = dataset.evaluate(
+                results=outputs,
+                metric=args.metrics,
+                metric_options=args.metric_options,
+                logger=logger)
             results.update(eval_results)
             for k, v in eval_results.items():
                 if isinstance(v, np.ndarray):

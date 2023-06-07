@@ -5,33 +5,16 @@ import warnings
 import numpy as np
 import torch
 import torch.distributed as dist
-from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
-from mmcv.runner import (DistSamplerSeedHook, build_optimizer, build_runner,
-                         get_dist_info)
+from mmcv.runner import (DistSamplerSeedHook, Fp16OptimizerHook,
+                         build_optimizer, build_runner, get_dist_info)
 
-from mmcls.core import DistOptimizerHook
+from mmcls.core import DistEvalHook, DistOptimizerHook, EvalHook
 from mmcls.datasets import build_dataloader, build_dataset
-from mmcls.utils import get_root_logger
-
-# TODO import eval hooks from mmcv and delete them from mmcls
-try:
-    from mmcv.runner.hooks import EvalHook, DistEvalHook
-except ImportError:
-    warnings.warn('DeprecationWarning: EvalHook and DistEvalHook from mmcls '
-                  'will be deprecated.'
-                  'Please install mmcv through master branch.')
-    from mmcls.core import EvalHook, DistEvalHook
-
-# TODO import optimizer hook from mmcv and delete them from mmcls
-try:
-    from mmcv.runner import Fp16OptimizerHook
-except ImportError:
-    warnings.warn('DeprecationWarning: FP16OptimizerHook from mmcls will be '
-                  'deprecated. Please install mmcv>=1.1.4.')
-    from mmcls.core import Fp16OptimizerHook
+from mmcls.utils import (auto_select_device, get_root_logger,
+                         wrap_distributed_model, wrap_non_distributed_model)
 
 
-def init_random_seed(seed=None, device='cuda'):
+def init_random_seed(seed=None, device=None):
     """Initialize random seed.
 
     If the seed is not set, the seed will be automatically randomized,
@@ -47,7 +30,8 @@ def init_random_seed(seed=None, device='cuda'):
     """
     if seed is not None:
         return seed
-
+    if device is None:
+        device = auto_select_device()
     # Make sure all ranks share the same random seed to prevent
     # some potential bugs. Please refer to
     # https://github.com/open-mmlab/mmdetection/issues/6339
@@ -89,46 +73,70 @@ def train_model(model,
                 distributed=False,
                 validate=False,
                 timestamp=None,
-                device='cuda',
+                device=None,
                 meta=None):
+    """Train a model.
+
+    This method will build dataloaders, wrap the model and build a runner
+    according to the provided config.
+
+    Args:
+        model (:obj:`torch.nn.Module`): The model to be run.
+        dataset (:obj:`mmcls.datasets.BaseDataset` | List[BaseDataset]):
+            The dataset used to train the model. It can be a single dataset,
+            or a list of dataset with the same length as workflow.
+        cfg (:obj:`mmcv.utils.Config`): The configs of the experiment.
+        distributed (bool): Whether to train the model in a distributed
+            environment. Defaults to False.
+        validate (bool): Whether to do validation with
+            :obj:`mmcv.runner.EvalHook`. Defaults to False.
+        timestamp (str, optional): The timestamp string to auto generate the
+            name of log files. Defaults to None.
+        device (str, optional): TODO
+        meta (dict, optional): A dict records some import information such as
+            environment info and seed, which will be logged in logger hook.
+            Defaults to None.
+    """
     logger = get_root_logger()
 
     # prepare data loaders
     dataset = dataset if isinstance(dataset, (list, tuple)) else [dataset]
 
-    sampler_cfg = cfg.data.get('sampler', None)
+    # The default loader config
+    loader_cfg = dict(
+        # cfg.gpus will be ignored if distributed
+        num_gpus=cfg.ipu_replicas if device == 'ipu' else len(cfg.gpu_ids),
+        dist=distributed,
+        round_up=True,
+        seed=cfg.get('seed'),
+        sampler_cfg=cfg.get('sampler', None),
+    )
+    # The overall dataloader settings
+    loader_cfg.update({
+        k: v
+        for k, v in cfg.data.items() if k not in [
+            'train', 'val', 'test', 'train_dataloader', 'val_dataloader',
+            'test_dataloader'
+        ]
+    })
+    # The specific dataloader settings
+    train_loader_cfg = {**loader_cfg, **cfg.data.get('train_dataloader', {})}
 
-    data_loaders = [
-        build_dataloader(
-            ds,
-            cfg.data.samples_per_gpu,
-            cfg.data.workers_per_gpu,
-            # cfg.gpus will be ignored if distributed
-            num_gpus=len(cfg.gpu_ids),
-            dist=distributed,
-            round_up=True,
-            seed=cfg.seed,
-            sampler_cfg=sampler_cfg) for ds in dataset
-    ]
+    data_loaders = [build_dataloader(ds, **train_loader_cfg) for ds in dataset]
 
     # put model on gpus
     if distributed:
         find_unused_parameters = cfg.get('find_unused_parameters', False)
         # Sets the `find_unused_parameters` parameter in
         # torch.nn.parallel.DistributedDataParallel
-        model = MMDistributedDataParallel(
-            model.cuda(),
-            device_ids=[torch.cuda.current_device()],
+        model = wrap_distributed_model(
+            model,
+            cfg.device,
             broadcast_buffers=False,
             find_unused_parameters=find_unused_parameters)
     else:
-        if device == 'cuda':
-            model = MMDataParallel(
-                model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)
-        elif device == 'cpu':
-            model = model.cpu()
-        else:
-            raise ValueError(F'unsupported device name {device}.')
+        model = wrap_non_distributed_model(
+            model, cfg.device, device_ids=cfg.gpu_ids)
 
     # build runner
     optimizer = build_optimizer(model, cfg.optimizer)
@@ -141,6 +149,14 @@ def train_model(model,
         warnings.warn(
             'config is now expected to have a `runner` section, '
             'please set `runner` in your config.', UserWarning)
+
+    if device == 'ipu':
+        if not cfg.runner['type'].startswith('IPU'):
+            cfg.runner['type'] = 'IPU' + cfg.runner['type']
+        if 'options_cfg' not in cfg.runner:
+            cfg.runner['options_cfg'] = {}
+        cfg.runner['options_cfg']['replicationFactor'] = cfg.ipu_replicas
+        cfg.runner['fp16_cfg'] = cfg.get('fp16', None)
 
     runner = build_runner(
         cfg.runner,
@@ -157,9 +173,22 @@ def train_model(model,
 
     # fp16 setting
     fp16_cfg = cfg.get('fp16', None)
+
+    if fp16_cfg is None and device == 'npu':
+        fp16_cfg = {'loss_scale': 'dynamic'}
+
     if fp16_cfg is not None:
-        optimizer_config = Fp16OptimizerHook(
-            **cfg.optimizer_config, **fp16_cfg, distributed=distributed)
+        if device == 'ipu':
+            from mmcv.device.ipu import IPUFp16OptimizerHook
+            optimizer_config = IPUFp16OptimizerHook(
+                **cfg.optimizer_config,
+                loss_scale=fp16_cfg['loss_scale'],
+                distributed=distributed)
+        else:
+            optimizer_config = Fp16OptimizerHook(
+                **cfg.optimizer_config,
+                loss_scale=fp16_cfg['loss_scale'],
+                distributed=distributed)
     elif distributed and 'type' not in cfg.optimizer_config:
         optimizer_config = DistOptimizerHook(**cfg.optimizer_config)
     else:
@@ -179,13 +208,15 @@ def train_model(model,
     # register eval hooks
     if validate:
         val_dataset = build_dataset(cfg.data.val, dict(test_mode=True))
-        val_dataloader = build_dataloader(
-            val_dataset,
-            samples_per_gpu=cfg.data.samples_per_gpu,
-            workers_per_gpu=cfg.data.workers_per_gpu,
-            dist=distributed,
-            shuffle=False,
-            round_up=True)
+        # The specific dataloader settings
+        val_loader_cfg = {
+            **loader_cfg,
+            'shuffle': False,  # Not shuffle by default
+            'sampler_cfg': None,  # Not use sampler by default
+            'drop_last': False,  # Not drop last by default
+            **cfg.data.get('val_dataloader', {}),
+        }
+        val_dataloader = build_dataloader(val_dataset, **val_loader_cfg)
         eval_cfg = cfg.get('evaluation', {})
         eval_cfg['by_epoch'] = cfg.runner['type'] != 'IterBasedRunner'
         eval_hook = DistEvalHook if distributed else EvalHook

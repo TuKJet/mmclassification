@@ -1,3 +1,4 @@
+# flake8: noqa
 # Configuration file for the Sphinx documentation builder.
 #
 # This file only contains a selection of the most common options. For a full
@@ -44,9 +45,10 @@ release = get_version()
 # ones.
 extensions = [
     'sphinx.ext.autodoc',
+    'sphinx.ext.autosummary',
+    'sphinx.ext.intersphinx',
     'sphinx.ext.napoleon',
     'sphinx.ext.viewcode',
-    'sphinx_markdown_tables',
     'myst_parser',
     'sphinx_copybutton',
 ]
@@ -86,48 +88,65 @@ html_theme_path = [pytorch_sphinx_theme.get_html_theme_path()]
 # further.  For a list of options available for each theme, see the
 # documentation.
 #
+# yapf: disable
 html_theme_options = {
-    'logo_url':
-    'https://mmclassification.readthedocs.io/en/latest/',
+    'logo_url': 'https://mmclassification.readthedocs.io/en/latest/',
     'menu': [
         {
             'name': 'GitHub',
             'url': 'https://github.com/open-mmlab/mmclassification'
         },
         {
-            'name':
-            'Colab Tutorials',
+            'name': 'Colab Tutorials',
             'children': [
                 {
-                    'name':
-                    'Train and inference with shell commands',
-                    'url':
-                    'https://colab.research.google.com/github/'
-                    'open-mmlab/mmclassification/blob/master/docs/en/'
-                    'tutorials/MMClassification_tools.ipynb',
+                    'name': 'Train and inference with shell commands',
+                    'url': 'https://colab.research.google.com/github/open-mmlab/mmclassification/blob/master/docs/en/tutorials/MMClassification_tools.ipynb',
                 },
                 {
-                    'name':
-                    'Train and inference with Python APIs',
-                    'url':
-                    'https://colab.research.google.com/github/'
-                    'open-mmlab/mmclassification/blob/master/docs/en/'
-                    'tutorials/MMClassification_python.ipynb',
+                    'name': 'Train and inference with Python APIs',
+                    'url': 'https://colab.research.google.com/github/open-mmlab/mmclassification/blob/master/docs/en/tutorials/MMClassification_python.ipynb',
                 },
             ]
         },
+        {
+            'name': 'Version',
+            'children': [
+                {
+                    'name': 'MMClassification 0.x',
+                    'url': 'https://mmclassification.readthedocs.io/en/latest/',
+                    'description': 'master branch'
+                },
+                {
+                    'name': 'MMClassification 1.x',
+                    'url': 'https://mmclassification.readthedocs.io/en/dev-1.x/',
+                    'description': '1.x branch'
+                },
+            ],
+        }
     ],
     # Specify the language of shared menu
-    'menu_lang':
-    'en'
+    'menu_lang': 'en',
+    'header_note': {
+        'content':
+        'You are reading the documentation for MMClassification 0.x, which '
+        'will soon be deprecated at the end of 2022. We recommend you upgrade '
+        'to MMClassification 1.0 to enjoy fruitful new features and better '
+        'performance brought by OpenMMLab 2.0. Check the '
+        '<a href="https://mmclassification.readthedocs.io/en/dev-1.x/get_started.html#installation">installation tutorial</a>, '
+        '<a href="https://mmclassification.readthedocs.io/en/dev-1.x/migration.html">migration tutorial</a> '
+        'and <a href="https://mmclassification.readthedocs.io/en/dev-1.x/notes/changelog.html">changelog</a> '
+        'for more details.',
+    }
 }
+# yapf: enable
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['_static']
 html_css_files = ['css/readthedocs.css']
-#  html_js_files = ['js/custom.js']
+html_js_files = ['js/custom.js']
 
 # -- Options for HTMLHelp output ---------------------------------------------
 
@@ -218,6 +237,15 @@ StandaloneHTMLBuilder.supported_image_types = [
 # Ignore >>> when copying code
 copybutton_prompt_text = r'>>> |\.\.\. '
 copybutton_prompt_is_regexp = True
+# Auto-generated header anchors
+myst_heading_anchors = 3
+# Configuration for intersphinx
+intersphinx_mapping = {
+    'python': ('https://docs.python.org/3', None),
+    'numpy': ('https://numpy.org/doc/stable', None),
+    'torch': ('https://pytorch.org/docs/stable/', None),
+    'mmcv': ('https://mmcv.readthedocs.io/en/master/', None),
+}
 
 
 def builder_inited_handler(app):
@@ -225,5 +253,4 @@ def builder_inited_handler(app):
 
 
 def setup(app):
-    app.add_js_file('./_static/js/custom.js')
     app.connect('builder-inited', builder_inited_handler)
